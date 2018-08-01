@@ -14,7 +14,7 @@ def get_training_list():
     print("Getting training list data...")
     sz=1
     i=0
-    while sz<12:
+    while sz<=12:
         train_x=[]
         file_found=True
         prefix="images_0"
@@ -23,11 +23,13 @@ def get_training_list():
         else:
             dirname=prefix+str(sz)
         print('Exploring',dirname)
-        while(file_found and i<78484):
+        tl=len(train_list)
+        while(file_found and i<tl):
             #print(i,end=" ")
             image_path=os.path.join(input_path+dirname,train_list[i])
             #print(image_path)
             if(exists(image_path)==False):
+                print(i,dirname,train_list[i])
                 file_found=False
                 sz=sz+1
                 break
@@ -41,14 +43,17 @@ def get_training_list():
             img_resized=skimage.transform.resize(img,(256,256))
             train_x.append(np.array(img_resized/255).reshape(256,256,1))
             i=i+1
-        if(i>=78484):
+        if(i>=tl or sz==12):
             sz=sz+1
-        print()
-        npname="train_reshaped_"+str(sz-1)+".npy"
-        print("Writing into",npname,"...")
-        train_x=np.array(train_x)
-        np.save(os.path.join(output_path,npname),train_x)
-        print('Saved',npname,'\n')
+        if(len(train_x)>0):
+            print()
+            npname="train_reshaped_"+str(sz-1)+".npy"
+            print("Writing into",npname,"...")
+            train_x=np.array(train_x)
+            np.save(os.path.join(output_path,npname),train_x)
+            print('Saved',npname,'\n')
+
+
 
 
 def get_valid_list():
@@ -56,7 +61,7 @@ def get_valid_list():
     #global valid_x
     sz=1
     i=0
-    while sz<12:
+    while sz<=12:
         valid_x=[]
         file_found=True
         prefix="images_0"
@@ -65,9 +70,12 @@ def get_valid_list():
         else:
             dirname=prefix+str(sz)
         print('Exploring',dirname)
-        while(file_found and i<11211):
+        tl=len(valid_list)
+        while(file_found and i<tl):
+            #print(valid_list[i])
             image_path=os.path.join(input_path+dirname,valid_list[i])
             if(exists(image_path)==False):
+                print(i,dirname,valid_list[i])
                 file_found=False
                 sz=sz+1
                 break
@@ -77,14 +85,16 @@ def get_valid_list():
             img_resized=skimage.transform.resize(img,(256,256))
             valid_x.append(np.array(img_resized/255).reshape(256,256,1))
             i=i+1
-    if(i>=11211):
-        sz=sz+1
-    print()
-    npname="valid_reshaped_"+str(sz-1)+".npy"
-    print("Writing into",npname,"...")
-    valid_x=np.array(valid_x)
-    np.save(os.path.join(output_path,npname),valid_x)
-    print("Saved",npname,"\n")
+        #print(i)
+        if(i>=tl or sz==12):
+            sz=sz+1
+        if(len(valid_x)>0):
+            print()
+            npname="valid_reshaped_"+str(sz-1)+".npy"
+            print("Writing into",npname,"...")
+            valid_x=np.array(valid_x)
+            np.save(os.path.join(output_path,npname),valid_x)
+            print("Saved",npname,"\n")
 
 
 def get_labels(data_element):
@@ -132,9 +142,9 @@ train_y=[]
 valid_x=[]
 valid_y=[]
 
-#get_training_list()
+get_training_list()
 get_valid_list()
-'''label_process()
+label_process()
 encoder = MultiLabelBinarizer()
 #print(encoder.classes_)
 encoder.fit(train_y)
@@ -151,4 +161,3 @@ with open(output_path+"/valid_y_onehot.pkl","wb") as f:
     pickle.dump(valid_y_onehot,f)
 with open(output_path+"/label_encoder.pkl","wb") as f:
     pickle.dump(encoder,f)
-'''
