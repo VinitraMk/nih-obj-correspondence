@@ -45,6 +45,11 @@ class ChestXRayDataSet(Dataset):
 
 
 if __name__=='__main__':
+    
+    if torch.cuda.is_available():
+        sys.exit(0)
+    else:
+        device=torch.device("cuda:0")
 
     cwd=os.getcwd()
     print('Using device:',torch.cuda.get_device_name(0))
