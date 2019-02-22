@@ -22,9 +22,12 @@ from sklearn.metrics import accuracy_score,jaccard_similarity_score
 from matplotlib.pyplot import imshow
 import matplotlib.pyplot as plt
 import skimage.transform
-from HeatMap import HeatMap
 import matplotlib.image as mpimg
-
+from PIL import Image
+from torch import topk
+from HeatMap import HeatMap
+from scipy.ndimage import gaussian_filter
+import matplotlib.image as mpimg
 
 feature_hooks=[]
 fc_hooks=[]
@@ -86,30 +89,6 @@ class ChestXRayDataSet(Dataset):
             item=self.transform(item)
         return item,torch.from_numpy(label).type(torch.FloatTensor)
 
-def old_method():
-    dataset=ChestXRayDataSet(data_files,label_file,
-        transform=transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.RandomCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.224])
-            ]))
-    data_loader=DataLoader(dataset=dataset,batch_size=1,shuffle=True)
-
-    gt=torch.FloatTensor()
-    pred=torch.FloatTensor()
-    i=1
-    print(len(data_loader))
-
-    if torch.no_grad():
-        for (image,target) in data_loader:
-            image=Variable(image.view(-1,1,224,224),0)
-            output=model(image)
-            sigm=torch.nn.Sigmoid()
-            probs=sigm(output)
-            print(probs)
-            indices=np.argwhere(probs>=0.067)
-
 def image_loader(image_name):
     imsize=224
     normalize = transforms.Normalize(
@@ -135,16 +114,6 @@ def image_loader(image_name):
     image=Variable(image,requires_grad=True)
     return image
 
-def compute_AUCs(gt, pred):
-
-    AUROCs = []
-    gt_np = gt.cpu().numpy()
-    pred_np = pred.cpu().numpy()
-    for i in range(N_CLASSES):
-        AUROCs.append(roc_auc_score(gt_np[:, i], pred_np[:, i]))
-    return AUROCs
-
-
 def feature_hook(module,input,output):
     feature_hooks.append(output)
 
@@ -154,12 +123,10 @@ def fc_hook(module,input,output):
 def getCAM(feature_conv,weight_fc,class_idx):
     _,nc,h,w=feature_conv.shape
     cam=weight_fc[class_idx].dot(feature_conv.data.numpy().reshape((nc,h*w)))
-    print('shape',cam.shape)
     cam=cam.reshape(h,w)
-    '''cam=cam-np.min(cam)
+    cam=cam-np.min(cam)
     cam_img=cam/np.max(cam)
-    '''
-    return [cam]
+    return [cam_img]
 
 class ResNet(nn.Module):
     def __init__(self,num_classes):
@@ -183,14 +150,14 @@ def main():
     N_CLASSES=15
 
     model=ResNet(N_CLASSES)
-    model_file_name='/home/mikasa/ml/beproject/showntest/ResNet_Epoch_6_09022019.pkl'
+    model_file_name='/home/killua/ml/beproject/showntest/ResNet_Epoch_1_14022019.pkl'
     checkpoint=torch.load(model_file_name,map_location=lambda storage, loc: storage)
     model.load_state_dict(checkpoint["state_dict"])
     #model.cuda()
     model.eval()
     conv_layer= model._modules.get('resnet18').layer4
-    model._modules.get('resnet18').layer4[1].conv2.register_forward_hook(feature_hook)
-    model._modules.get('resnet18').fc.register_forward_hook(fc_hook)
+    #model._modules.get('resnet18').layer4[1].conv2.register_forward_hook(feature_hook)
+    model._modules.get('resnet18').layer4.register_forward_hook(feature_hook)
 
     display_transform=transforms.Compose([transforms.Resize((512,512))])
 
@@ -217,13 +184,7 @@ def main():
     avg_acc=0.0
     all_targets=[]
     all_bin_preds=[]
-    prev_overlay=list()
-    overlays=[]
-
-    fig=plt.figure(figsize=(8,8))
-    col=2
-    rows=5
-
+    
     for i in range(len(data_files)):
         fname=labels[i].split(":")[0]
         target=labels[i].split(":")[1].rstrip()
@@ -244,12 +205,15 @@ def main():
 
         if(fname==data_files[i]):
             impath=os.path.join(cwd,fname)
+            img=cv2.imread(impath)
+            img=cv2.resize(img,(224,224))
             img_tensor=image_loader(impath)
             img_tensor=Variable(img_tensor.view(-1,3,224,224),0)
             if torch.no_grad():
                 
                 output=model(img_tensor)
-                pred_probabilities=F.softmax(output).data.squeeze()
+                sigm=torch.nn.Sigmoid()
+                pred_probabilities=sigm(output)[0]
 
                 
                 indices=np.argwhere(pred_probabilities>=0.066)[0]
@@ -264,28 +228,68 @@ def main():
                 #print(pred_label)
                 row=[fname,pred_label]
                 csv_writer.writerow(row)
+                preds=topk(pred_probabilities,10)[1].data
 
-                if 5 in indices:
-                    weight_softmax_params=list(model._modules.get('resnet18').fc.parameters())
-                    weight_softmax=np.squeeze(weight_softmax_params[0].cpu().data.numpy())
-                    overlay=getCAM(feature_hooks[-1],weight_softmax,5)
-                    overlays.append(overlay[0])
 
-                    fig.add_subplot(rows,col,i+1)
-                    plt.imshow(overlay[0])
+                #<================== Object Localization =========================>
+
+                weight_softmax_params=list(model._modules.get('resnet18').fc.parameters())
+                weight_softmax=np.squeeze(weight_softmax_params[0].cpu().data.numpy())
+                overlay=getCAM(feature_hooks[-1],weight_softmax,11)
+
+                imgoverlay=Image.fromarray(overlay[0],'RGB')
+                imgoverlay.save('overlay.png')
+                imgoverlay=cv2.imread('overlay.png')
+                #imshow(imgoverlay)
+                #print(imgoverlay)
+                
+                red_boundary=[np.array([28,28,128]),np.array([97,105,255])]
+                mask=cv2.inRange(imgoverlay,red_boundary[0],red_boundary[1])
+                cropped=cv2.bitwise_and(imgoverlay,imgoverlay,mask=mask)
+                cropped_gray=cv2.cvtColor(cropped,cv2.COLOR_BGR2GRAY)
+                #imshow(cropped_gray,cmap='jet')
+
+
+                #heatmap_image=Image.fromarray(overlay[0]*255)
+                heatmap_image=Image.fromarray(cropped_gray)
+                #print(list(heatmap_image.getdata()))
+                heatmap_image=heatmap_image.resize((224,224))
+                heatmap_image=gaussian_filter(heatmap_image,sigma=(10,10),order=0)
+                heatmap_image=np.asarray(heatmap_image)
+
+                heatmap_resized=Image.fromarray(heatmap_image)
+                heatmap_resized.save('heatmap.png')
+
+                heatmap_resized=cv2.imread('heatmap.png')
+                #print(heatmap_resized.shape)
+                unique_vals=[]
+                #print(np.amax(heatmap_resized))
+                #imshow(heatmap_resized)
+                box_mask=cv2.inRange(heatmap_resized,np.array([1,1,1]),np.array([108,108,108]))
+                #imshow(box_mask,cmap='jet')
+
+
+                fig=plt.figure()
+                ax=fig.add_subplot(111)
+                img=np.asarray(img)
+                #'''
+                ax.imshow(img)
+                ax.imshow(box_mask,alpha=0.5,cmap='jet')
+                plt.show()
+                #'''
+
 
 
         done=int(((i+1)/len(labels))*100)
         #sys.stdout.write("\r% of files done processing: "+str(done))
 
     plt.show()
-    print(overlays)
     avg_acc=avg_acc/len(data_files)
     #avg_acc=jaccard_similarity_score(np.array(all_targets),np.array(all_bin_preds),normalize=True)
     #print("\n\nResults saved in",output_file_name)
     print("Average accuracy is: %.2f" %(avg_acc*100))
     total_time_exec=int(time.time()-start_time)//60
-    return avg_acc*100
+    #return avg_acc*100
     #print("\nTotal Time taken: "+str(total_time_exec)+" minutes")
     
 
