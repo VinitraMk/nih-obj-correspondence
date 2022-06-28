@@ -1,206 +1,212 @@
-import pandas as pd
-import torch
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-import os, sys
-import pickle
-from collections import defaultdict
-from sklearn.preprocessing import MultiLabelBinarizer
-import numpy as np
+import os,sys
+import time
+import argparse
+import statistics
+import torch 
 import torch.nn as nn
-import torch.backends.cudnn as cudnn
-import torchvision
+import torchvision.datasets as dsets
+from skimage import transform
 import torchvision.transforms as transforms
 from torch.autograd import Variable
-from sklearn.metrics import roc_auc_score
-import torch.optim as optim
-import matplotlib.pyplot as plt
+import pandas as pd;
+import numpy as np;
+from torch.utils.data import Dataset, DataLoader
+#from vis_utils import *
+import random;
+import math;
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+#plt.ion()   
+num_epochs=3
+batch_size=4
+learning_rate=0.001
+os.environ['CUDA_VISIBLE_DEVICES']="0"
 
-def compute_AUCs(gt, pred):
-	
-    AUROCs = []
-    gt_np = gt.cpu().numpy()
-    pred_np = pred.cpu().numpy()
-    for i in range(N_CLASSES):
-        AUROCs.append(roc_auc_score(gt_np[:, i], pred_np[:, i]))
-    return AUROCs
+class ChestXRayDataSet(Dataset):
+    def __init__(self,data_path,label_path,transform=None):
+        self.X=np.uint8(np.load(data_path)*255*255)
+        with open(label_path,"rb") as f:
+            self.y=pickle.load(f)
+        sub_bool=(self.y.sum(axis=1)!=0)
+        print('sub_bool',sub_bool)
+        self.y=self.y[sub_bool,:]
+        self.X=self.X[sub_bool,:]
+        self.transform=transform
 
-
-# ====== prepare dataset ======
-class ChestXrayDataSet(Dataset):
-    def __init__(self, train_or_valid = "train", transform=None):
-
-        data_path = sys.argv[1]
-        self.train_or_valid = train_or_valid
-        if train_or_valid == "train":
-            self.X = np.uint8(np.load(data_path + "train_reshaped_001.npy")*255*255)
-            with open(data_path + "train_y_onehot.pkl", "rb") as f:
-                self.y = pickle.load(f)
-            sub_bool = (self.y.sum(axis=1)!=0)
-            self.y = self.y[sub_bool,:]
-            self.X = self.X[sub_bool,:]
-        else:
-            self.X = np.uint8(np.load(data_path + "valid_reshaped_001.npy")*255*255)
-            with open(data_path + "valid_y_onehot.pkl", "rb") as f:
-                self.y = pickle.load(f)
-        
-        self.label_weight_pos = (len(self.y)-self.y.sum(axis=0))/len(self.y)
-        self.label_weight_neg = (self.y.sum(axis=0))/len(self.y)
-#         self.label_weight_pos = len(self.y)/self.y.sum(axis=0)
-#         self.label_weight_neg = len(self.y)/(len(self.y)-self.y.sum(axis=0))
-        self.transform = transform
-
-    def __getitem__(self, index):
-        """
-        Args:
-            index: the index of item 
-        Returns:
-            image and its labels
-        """
-        current_X = np.tile(self.X[index],3) 
-        label = self.y[index]
-        label_inverse = 1- label
-        weight = np.add((label_inverse * self.label_weight_neg),(label * self.label_weight_pos))
-        if self.transform is not None:
-            image = self.transform(current_X)
-        return image, torch.from_numpy(label).type(torch.FloatTensor), torch.from_numpy(weight).type(torch.FloatTensor)
     def __len__(self):
         return len(self.y)
 
-# construct model
-class AlexNet(nn.Module):
+    def __getitem__(self,index):
+        item=self.X[index]
+        label=self.y[index]
 
-    def __init__(self, num_classes):
-        super(AlexNet, self).__init__()
-        self.alexnet=torchvision.models.alexnet(pretrained=True)
-        num_ftrs=self.alexnet.classifier[6].in_features
-        features=list(self.alexnet.classifier.children())[:-1]
-        features.extend([nn.Linear(num_ftrs,num_classes)])
-        self.alexnet.classifier=nn.Sequential(*features)
-
-    def forward(self, x):
-        x=self.alexnet(x)
-        return x
+        if self.transform:
+            item=self.transform(item)
+        return (item,label)
 
 
+if __name__=='__main__':
+    
+    if torch.cuda.is_available():
+        sys.exit(0)
+    else:
+        device=torch.device("cuda:0")
 
-if __name__ == '__main__':
+    cwd=os.getcwd()
+    print('Using device:',torch.cuda.get_device_name(0))
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--dataset",action="store",required=True,help='get path to dataset',dest='dataset')
+    parser.add_argument("--output",action="store",required=True,help='get path to output',dest='output')
+    args=parser.parse_args()
+    dataset=os.path.join(cwd,args.__dict__['dataset'])
+    output=os.path.join(cwd,args.__dict__['output'])
+    epoch_losses=[]
 
-	# prepare training set
-	train_dataset = ChestXrayDataSet(train_or_valid="train",
-                                    transform=transforms.Compose([
-                                        transforms.ToPILImage(),
-                                        transforms.RandomCrop(224),
-                                        transforms.RandomHorizontalFlip(),
-                                        transforms.ToTensor(),
-                                        transforms.Normalize([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
-                                        ]))
-	augment_img = []
-	augment_label = []
-	augment_weight = []
-	for i in range(4):
-		for j in range(len(train_dataset)):
-			single_img, single_label, single_weight = train_dataset[j]
-			augment_img.append(single_img)
-			augment_label.append(single_label)
-			augment_weight.append(single_weight)
-			if j % 1000==0:
-				print(j)
+    
+    for epoch in range(num_epochs):
+        epoch_start_time=time.time()
+        print("Epoch",epoch)
 
-	# shuffe data
-	perm_index = torch.randperm(len(augment_label))
-	augment_img = torch.stack(augment_img)[perm_index]
-	augment_label = torch.stack(augment_label)[perm_index]
-	augment_weight = torch.stack(augment_weight)[perm_index]
+        data_files=sorted([x for x in os.listdir(dataset) if x.startswith('train') and x.endswith('.npy')])
+        label_files=sorted([x for x in os.listdir(dataset) if x.startswith('train') and x.endswith('.pkl')])
+        print(data_files)
+        print(label_files)
+        batch_losses=[]
+        epoch_loss=0.0
 
-	# prepare validation set
-	valid_dataset = ChestXrayDataSet(train_or_valid="valid",
-					transform=transforms.Compose([
-							transforms.ToPILImage(),
-							transforms.CenterCrop(224),
-							transforms.ToTensor(),
-							transforms.Normalize([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
-							]))
+        #Augmentation of training data
+        for i in range(len(data_files)):
+            print("Training",data_files[i])
+            dataset=ChestXRayDataSet(data_files[i],label_files[i],
+                    transform=transforms.Compose([
+                        transforms.ToPILImage(),
+                        transforms.RandomCrop(224),
+                        transforms.RandomHorizontalFlip(),
+                        transforms.ToTensor(),
+                        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.224])
+                        ]))
+            augment_img=[]
+            augment_label=[]
+            augment_weight=[]
+            for i in range(2):
+                for j in range(len(dataset)):
+                    single_img,single_label,single_weight=dataset[j]
+                    augment_img.append(single_img)
+                    augment_label.append(single_label)
+                    augment_weight.append(single_weight)
+                    if j%1000==0:
+                        print(j)
+            print("Data Augmentation done OK")
+            print("Length of augment data:",len(augment_label))
 
-	valid_loader = DataLoader(dataset=valid_dataset, batch_size=16, shuffle=False, num_workers=16)
-	# ====== start trianing =======
+            #shuffle data
+            permuted_order=torch.randperm(len(augment_label))
+            augment_img=torch.stack(augment_img)[permuted_order]
+            augment_label=torch.stack(augment_label)[permuted_order]
+            augment_weight=torch.stack(augment_weight)[permuted_order]
 
-	cudnn.benchmark = True
-	N_CLASSES = 8
-	BATCH_SIZE = 4
+            #======= start training =======#
 
-	# initialize and load the model
-	model = AlexNet(N_CLASSES).cuda()
-	model = torch.nn.DataParallel(model).cuda()
+            cuddn.benchmark=True
+            N_CLASSES=15
+            BATCH_SIZE=4
+            intermediate_model_filepath=os.path.join(cwd,'intermediate_model.pkl')
 
-	optimizer = optim.Adam(model.parameters(),lr=0.0002, betas=(0.9, 0.999))
-	total_length = len(augment_img)
-	for epoch in range(10):  # loop over the dataset multiple times
-		print("Epoch:",epoch)
-		running_loss = 0.0
+            #Check for intermediate model state
+            if os.path.exists(intermediate_model_filepath):
+                checkpoint=torch.load('intermediate_model.pkl')
+                model.load_state_dict(checkpoing['state_dict'])
+            else:
+                model=AlexNet(N_CLASSES).cuda()
+            #set model to train mode
+            model.train()
+            criterion=nn.CrossEntropyLoss()
+            optimizer=optim.Adam(model.parameters,lr=0.0002,betas=(0.9,0.999))
+            total_length=len(augment_img)
+            running_loss=0.0
 
-		# shuffle
-		perm_index = torch.randperm(len(augment_label))
-		augment_img = augment_img[perm_index]
-		augment_label = augment_label[perm_index]
-		augment_weight = augment_weight[perm_index]
+            for i in range(0,total_length,BATCH_SIZE):
+                if i+BATCH_SIZE>total_length:
+                    break
 
-		for index in range(0, total_length , BATCH_SIZE):
-			if index+BATCH_SIZE > total_length:
-				break
-			# zero the parameter gradients
-			optimizer.zero_grad()
-			inputs_sub = augment_img[index:index+BATCH_SIZE]
-			labels_sub = augment_label[index:index+BATCH_SIZE]
-			weights_sub = augment_weight[index:index+BATCH_SIZE]
-			inputs_sub, labels_sub = Variable(inputs_sub.cuda()), Variable(labels_sub.cuda())
-			weights_sub = Variable(weights_sub.cuda())
+                sub_input=augment_img[i:i+BATCH_SIZE]
+                sub_label=augment_label[i:i+BATCH_SIZE]
+                sub_weights=augment_weight[i:i+BATCH_SIZE]
 
-			# forward + backward + optimize
-			outputs = model(inputs_sub)
-			criterion = nn.BCEWithLogitsLoss()
-			loss = criterion(outputs, labels_sub)
-			loss.backward()
-			optimizer.step()
-			running_loss += loss.data[0]
+                sub_input,sub_label,sub_weights=Variable(sub_input.cuda()),Variable(sub_label.cuda()),Variable(sub_weights.cuda())
+
+                #forward + backward + optimizer update
+
+                output=model(sub_input)
+                loss=criterion(output,sub_label)
+                loss.backward()
+                optimizer.step()
+                running_loss+=loss.data[0]
+
+            batch_loss=running_lost/total_length
+            batch_losses.append(batch_loss)
+
+            #Save model for use in next batch
+            state = {'state_dict':model.state_dict(),
+                    'optimizer':optimizer.state_dict(),
+                    'loss':batch_loss,}
+            torch.save(state,'intermediate_model.pkl')
+
+        
+            #========= validation ==========#
+
+            data_files=sorted([x for x in os.listdir(dataset) if x.startswith('train') and x.endswith('.npy')])
+            label_files=sorted([x for x in os.listdir(dataset) if x.startswith('train') and x.endswith('.pkl')])
+            print(data_files)
+            print(label_files)
+
+            for i in range(len(data_files)):
+
+                #Initialize validation set
+                dataset=ChestXRayDataSet(data_files[i],label_files[i],
+                        transform=transforms.Compose([
+                                transforms.ToPILImage(),
+                                transforms.RandomCrop(224),
+                                transforms.ToTensor(),
+                                transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.224])
+                                ]))
+                data_loader=DataLoader(dataset=dataset,batch_size=4,shuffle=True)
 
 
-		# ======== validation ======== 
-		# switch to evaluate mode
-		model.eval()
+                #switch to eval mode 
+                model.eval()
+                correct=0
+                total=0
 
+                for (image,label,weight) in data_loader:
+                    labels=label.cuda()
+                    image=Variable(image.view(-1,3,224,224).cuda())
+                    output=model(image)
+                    _,predicted=torch.max(output.data,1)
+                    total+=label.size(0)
+                    correct+=(predicted==labels).sum()
 
-		# initialize the ground truth and output tensor
-		gt = torch.FloatTensor()
-		gt = gt.cuda()
-		pred = torch.FloatTensor()
-		pred = pred.cuda()
+            if os.path.exists(intermediate_model_filepath):
+                os.remove(intermediate_model_filepath)
 
+            #Print statistics
+            print('Validation data test accuracy of the model on in epoch',str(epoch+1),'is',len(data_files),' test images: %.3f %%'
+                    %(100*correct/total))
+            print('Time taken for epoch #'+str(epoch+1)+' is: '+str((time.time()-start_time())/3600)+' hours')
+            epoch_loss=statistics.mean(batch_losses)
 
-		for i, (inp, target, weight) in enumerate(valid_loader):
-			target = target.cuda()
-			gt = torch.cat((gt, target), 0)
-			#     bs, n_crops, c, h, w = inp.size()
-			input_var = Variable(inp.view(-1, 3, 224, 224).cuda())
-			output = model(input_var)
-			#     output_mean = output.view(bs, n_crops, -1).mean(1)
-			pred = torch.cat((pred, output.data), 0)
+            #Visualize losses
+            plt.xkcd()
+            plt.xlabel('Batch #')
+            plt.ylabel('Loss')
+            plt.plot(batch_losses)
+            #plt.show()
+            plt.savefig('Epoch_#'+str(epoch+1))
 
-		CLASS_NAMES = ['Atelectasis', 'Cardiomegaly','Effusion', 'Infiltration',
-						'Mass','Nodule', 'Pneumonia', 'Pneumothorax']
+            #Save model for use in next batch
+            state = {'state_dict':model.state_dict(),
+                    'optimizer':optimizer.state_dict(),
+                    'loss':epoch_loss,}
 
-		AUROCs = compute_AUCs(gt, pred)
-		AUROC_avg = np.array(AUROCs).mean()
-		print('The average AUROC is {AUROC_avg:.3f}'.format(AUROC_avg=AUROC_avg))
-		for i in range(N_CLASSES):
-		    print('The AUROC of {} is {}'.format(CLASS_NAMES[i], AUROCs[i]))
+            torch.save(state,'AlexNet_Epoch_'+str(epoch+1)+'.pkl')
+            
 
-		model.train()
-
-		# print statistics
-		print('[%d] loss: %.3f' % (epoch + 1, running_loss / 715 ))
-		torch.save(model.state_dict(),'AlexNet_aug4_pretrain_noWeight_'+str(epoch+1)+'_'+str(AUROC_avg)+'.pkl')
-
-	print('Finished Training')
